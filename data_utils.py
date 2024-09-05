@@ -43,8 +43,8 @@ def build_openwebtext():
 
     tokenized_data['train'].set_format(type="torch", columns=['input_ids', 'attention_mask'])
     tr_X = tokenized_data['train']['input_ids']
-    tr_Y = [0 for i in range(len(tr_X))]
-
+    tr_Y = [-1 for i in range(len(tr_X))]
+    
     trainset = list(zip(tr_X, tr_Y))
     return trainset
 

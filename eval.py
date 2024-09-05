@@ -6,6 +6,33 @@ from tqdm import tqdm
 from copy import deepcopy
 import pickle
 from datasets import load_dataset
+from transformers import GPT2Model
+from transformers.modeling_outputs import BaseModelOutputWithPast
+
+class GPT2ForCausalLMFromSeqClass(GPT2Model):
+    def __init__(self, original_model):
+        super().__init__(original_model.config)
+        self.transformer = original_model.transformer  # Keep the transformer layers
+        self.lm_head = torch.nn.Linear(original_model.config.hidden_size, original_model.config.vocab_size, bias=False)
+        self.lm_head.weight = self.transformer.wte.weight  # Tie weights with the input embeddings
+
+    def forward(self, input_ids=None, attention_mask=None, **kwargs):
+        # Pass inputs through the transformer layers
+        transformer_outputs = self.transformer(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **kwargs
+        )
+        hidden_states = transformer_outputs.last_hidden_state
+
+        # Use the lm_head to get logits over the vocabulary
+        lm_logits = self.lm_head(hidden_states)
+
+        # Create an output object with a logits attribute
+        output = BaseModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=None, hidden_states=None, attentions=None)
+        output.logits = lm_logits
+
+        return output
 
 def str2bool(s):
     return s.lower() == 'true'
@@ -44,7 +71,7 @@ else:
     print("CUDA is not available. Training on CPU.")
 
 # Create run folder and args.json; raise error if folder exists.
-# args.name = f'eval_kd_{args.num_layers_rem}_layers_rem'
+args.name = f'eval_kd_{args.num_layers_rem}_layers_rem'
 run_dir = f"{args.dir}/{args.name}"
 os.makedirs(run_dir)
 import json
@@ -52,65 +79,28 @@ with open(f"{run_dir}/args.json", 'w') as f:
     json.dump(vars(args), f, indent=4)
     print(f"Saved args to {run_dir}")
 
-from transformers import AutoModelForSequenceClassification, AutoModelForCausalLM
-model_name = "gpt2"
-model = AutoModelForSequenceClassification.from_pretrained(model_name,num_labels=20,pad_token_id=50256)
+with open(f'checkpoints/kd_{args.num_layers_rem}_layers_rem_gpt2_openwebtext_epoch-1_kd.pkl', 'rb') as f:
+# with open(f'checkpoints/gpt2_20newsgroups_{args.num_layers_rem}_layers_rem.pkl', 'rb') as f:
+        model = pickle.load(f)
 model.cuda()
 
-K = args.num_layers_rem
-keep_layers = len(model.transformer.h) - K
-
-assert keep_layers > 0, "Cannot remove all layers. The model must retain at least one layer."
-print(keep_layers)
-model.transformer.h = model.transformer.h[:keep_layers]
-model.config.num_hidden_layers -= K
-
-
 import data_utils
-trainloader, _ = data_utils.build_dataset(args.dataset, args.batch_size)
-_, testloader = data_utils.build_dataset(args.eval_dataset, args.batch_size)
+trainloader, testloader = data_utils.build_dataset(args.dataset, args.batch_size)
 
-from train_utils import test_batch, eval_loop
-def save_model(model, name):
-    print("Saving checkpoint...")
-    with open(f'checkpoints/{name}.pkl', 'wb') as f:
-        pickle.dump(model, f)
+from train_utils import eval_loop
 
 
-def train(model, lr, epochs, trainloader, testloader, eval_freq):
+def evaluate(model, testloader, loadseqmodel):
+    if loadseqmodel:
+       model = GPT2ForCausalLMFromSeqClass(model)
+
     writer = tf.summary.create_file_writer(run_dir)
-    pbar = tqdm(range(epochs))
+    eval_accu = eval_loop(model, testloader)
+    with writer.as_default():
+        tf.summary.scalar('eval/accuracy', eval_accu, step=1)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=lr)
-    sched = torch.optim.lr_scheduler.StepLR(opt, step_size=1, gamma=0.99)
-
-    eval_accu = 0
-    for epoch in pbar:
-        prev_eval_accu = eval_accu
-        prev_model = deepcopy(model)
-        for x,y in tqdm(trainloader):
-            loss, correct, total = test_batch(model, x, y)
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-
-        sched.step()
-
-        if (epoch+1) % eval_freq == 0:
-            eval_accu = eval_loop(model, testloader)
-            with writer.as_default():
-                tf.summary.scalar('eval/accuracy', eval_accu, step=epoch+1)
-        pbar.set_description(f"eval: {eval_accu}")
-        if prev_eval_accu > eval_accu:
-            # Save checkpoint
-            save_model(prev_model, f'{model_name}_{args.dataset}_{args.num_layers_rem}_layers_rem')
-            break
-
-train(
+evaluate(
     model = model,
-    lr = args.lr,
-    epochs = args.epochs,
-    trainloader = trainloader,
-    testloader = testloader,
-    eval_freq=args.eval_freq
+    testloader = trainloader,
+    loadseqmodel = str2bool(args.loadseqmodel)
 )

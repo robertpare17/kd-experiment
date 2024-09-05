@@ -1,5 +1,6 @@
 import torch
 import tensorflow as tf
+from tqdm import tqdm
 ce = torch.nn.CrossEntropyLoss()
 def test_batch_cls(model, x, y): # classification
     outputs = model(x, labels=y)
@@ -53,7 +54,7 @@ def test_batch(model, x, y):
 def eval_loop(model, testloader):
     model.eval()
     total_count, total_correct = 0, 0
-    for x,y in testloader:
+    for x,y in tqdm(testloader):
         with torch.no_grad():
             _, correct, count = test_batch(model, x, y)
         total_count += count
