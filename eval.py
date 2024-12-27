@@ -43,7 +43,7 @@ def parse():
     parser.add_argument('--dir',           default='runs',         type=str)
     parser.add_argument('--name',          default='test',         type=str)
     parser.add_argument('--dataset',       default='openwebtext',  type=str)
-    parser.add_argument('--eval-dataset',  default='openwebtext',  type=str)
+    parser.add_argument('--eval-dataset',  default='20newsgroups',  type=str)
     parser.add_argument('--seed',          default=0,              type=int)
     parser.add_argument('--eval-freq',     default=1,              type=int)
     parser.add_argument('--num_layers_rem',default=0,              type=int)
@@ -53,6 +53,8 @@ def parse():
     parser.add_argument('--epochs',        default=1,              type=int)
     parser.add_argument('--loss',          default='MSE',          type=str)
     parser.add_argument('--loadseqmodel',  default='false',        type=str)
+    parser.add_argument('--columns_rem',   default=0,              type=int)
+    parser.add_argument('--by_norm',       default='true',         type=str)
     return parser.parse_args()
 
 # Must set CUDA_VISIBLE_DEVICES before importing any GPU-related libraries
@@ -71,7 +73,7 @@ else:
     print("CUDA is not available. Training on CPU.")
 
 # Create run folder and args.json; raise error if folder exists.
-args.name = f'eval_kd_{args.num_layers_rem}_layers_rem'
+args.name = f'eval_width_norm_heuristic_{args.columns_rem}_columns_rem'
 run_dir = f"{args.dir}/{args.name}"
 os.makedirs(run_dir)
 import json
@@ -79,13 +81,63 @@ with open(f"{run_dir}/args.json", 'w') as f:
     json.dump(vars(args), f, indent=4)
     print(f"Saved args to {run_dir}")
 
-with open(f'checkpoints/kd_{args.num_layers_rem}_layers_rem_gpt2_openwebtext_epoch-1_kd.pkl', 'rb') as f:
-# with open(f'checkpoints/gpt2_20newsgroups_{args.num_layers_rem}_layers_rem.pkl', 'rb') as f:
-        model = pickle.load(f)
+# with open(f'checkpoints/kd_{args.num_layers_rem}_layers_rem_gpt2_openwebtext_epoch-1_kd.pkl', 'rb') as f:
+with open(f'checkpoints/gpt2_20newsgroups_{args.columns_rem}_columns_rem_by_norm_{args.by_norm}.pkl', 'rb') as f:
+        tuned_model = pickle.load(f)
+tuned_model.cuda()
+
+
+from transformers import AutoModelForSequenceClassification, AutoModelForCausalLM
+model_name = "gpt2"
+model = AutoModelForSequenceClassification.from_pretrained(model_name,num_labels=20,pad_token_id=50256)
 model.cuda()
 
+by_norm = str2bool(args.by_norm)
+k = args.columns_rem
+for name, param in model.named_parameters():
+    if name in tuned_model.state_dict():
+        # model.state_dict()[name].copy_(tuned_model.state_dict()[name])
+        # assert(torch.equal(model.state_dict()[name], tuned_model.state_dict()[name]))
+        if k > 0 and ('mlp.c_proj.weight' in name or 'attn.c_proj.weight' in name or 'wte' in name or 'wpe' in name):
+            if by_norm:
+                weight_norms = torch.norm(param.data, dim=0)
+                smallest_indices = torch.topk(weight_norms, k, largest=False).indices
+            else:
+                smallest_indices = torch.arange(k)
+            assert(torch.sum(tuned_model.state_dict()[name][:, smallest_indices]) == 0)
+            num_cols = param.shape[1]
+            all_cols = torch.arange(num_cols).cuda()
+            select_cols = ~torch.isin(all_cols, smallest_indices)
+            model.state_dict()[name][:, select_cols].copy_(tuned_model.state_dict()[name][:, select_cols])
+
+        elif k > 0 and ('attn.c_proj.bias' in name or 'mlp.c_proj.bias' in name):
+            if by_norm:
+                assert(torch.sum(tuned_model.state_dict()[name][smallest_indices]) == 0)
+                model.state_dict()[name][select_cols].copy_(tuned_model.state_dict()[name][select_cols])
+            else:
+                assert(torch.sum(tuned_model.state_dict()[name][:k]) == 0)
+                model.state_dict()[name][k:].copy_(tuned_model.state_dict()[name][k:])
+
+        elif k > 0 and 'ln_f' in name:
+            if by_norm:
+                abs_param = torch.abs(param.data)
+                ln_f_smallest_indices = torch.topk(abs_param, k, largest=False).indices
+            else:
+                ln_f_smallest_indices = torch.arange(k)
+            assert(torch.sum(tuned_model.state_dict()[name][ln_f_smallest_indices]) == 0)
+            num_cols = param.shape[0]
+            all_cols = torch.arange(num_cols).cuda()
+            select_cols = ~torch.isin(all_cols, smallest_indices)
+            model.state_dict()[name][select_cols].copy_(tuned_model.state_dict()[name][select_cols])
+
+        else:
+            model.state_dict()[name].copy_(tuned_model.state_dict()[name])
+            assert(torch.equal(model.state_dict()[name], tuned_model.state_dict()[name]))
+
+
 import data_utils
-trainloader, testloader = data_utils.build_dataset(args.dataset, args.batch_size)
+# trainloader, testloader = data_utils.build_dataset(args.dataset, args.batch_size)
+trainloader, testloader = data_utils.build_dataset(args.eval_dataset, args.batch_size)
 
 from train_utils import eval_loop
 
@@ -101,6 +153,6 @@ def evaluate(model, testloader, loadseqmodel):
 
 evaluate(
     model = model,
-    testloader = trainloader,
+    testloader = testloader,
     loadseqmodel = str2bool(args.loadseqmodel)
 )

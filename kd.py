@@ -50,9 +50,6 @@ with open(f"{run_dir}/args.json", 'w') as f:
     print(f"Saved args to {run_dir}")
 
 from transformers import AutoModelForSequenceClassification, AutoModelForCausalLM
-# model_name = "gpt2"
-# model = AutoModelForSequenceClassification.from_pretrained(model_name,num_labels=20,pad_token_id=50256)
-# model.cuda()
 
 model_name = "gpt2"
 student_model = AutoModelForCausalLM.from_pretrained(model_name,pad_token_id=50256)
@@ -79,40 +76,12 @@ def save_model(model, name):
         pickle.dump(model, f)
 
 from train_utils import test_batch, eval_loop, eval_loop_kd
-# def train(model, lr, epochs, trainloader, testloader, eval_freq):
-#     writer = tf.summary.create_file_writer(run_dir)
-#     pbar = tqdm(range(epochs))
-
-#     opt = torch.optim.AdamW(model.parameters(), lr=lr)
-#     sched = torch.optim.lr_scheduler.StepLR(opt, step_size=1, gamma=0.99)
-
-#     eval_accu = 0
-#     for epoch in pbar:
-#         prev_eval_accu = eval_accu
-#         prev_model = deepcopy(model)
-#         for x,y in tqdm(trainloader):
-#             loss, correct, total = test_batch(model, x, y)
-#             opt.zero_grad()
-#             loss.backward()
-#             opt.step()
-
-#         sched.step()
-
-#         if (epoch+1) % eval_freq == 0:
-#             eval_accu = eval_loop(model, testloader)
-#             with writer.as_default():
-#                 tf.summary.scalar('eval/accuracy', eval_accu, step=epoch+1)
-#         pbar.set_description(f"eval: {eval_accu}")
-#         if prev_eval_accu > eval_accu:
-#             # Save checkpoint
-#             save_model(prev_model, f'{model_name}_{args.dataset}')
-#             break
 
 def knowledge_distill(student_model, teacher_model, trainloader, testloader, criterion, lr, eval_freq, epochs=10):
     '''
-    Instantiate GPT2 model without any particular head
-    Use MSE loss to train fresh GPT2 model
-    Attach score weight matrix from teacher model onto fresh GPT2 model and evaluate model on 20newsgroups
+    Instantiate (student) GPT2 model without any particular head
+    Use MSE/KD loss to train student GPT2 model
+    Attach score weight matrix from teacher model onto student GPT2 model and evaluate student model on 20newsgroups
     '''
     writer = tf.summary.create_file_writer(run_dir)
     pbar = tqdm(range(epochs))
@@ -146,15 +115,6 @@ def knowledge_distill(student_model, teacher_model, trainloader, testloader, cri
         save_model(student_model, f'{args.name}_{model_name}_{args.dataset}_epoch-{epoch+1}_kd')
 
 
-# train(
-#     model = model,
-#     lr = args.lr,
-#     epochs = args.epochs,
-#     trainloader = trainloader,
-#     testloader = testloader,
-#     eval_freq=args.eval_freq
-# )
-
 knowledge_distill(
     student_model = student_model,
     teacher_model = teacher_model,
@@ -165,5 +125,3 @@ knowledge_distill(
     eval_freq = args.eval_freq,
     epochs = args.epochs
 )
-
-# NOTE: runs/test_kd contains run for one epoch of kd with no pruning -- change this name later
